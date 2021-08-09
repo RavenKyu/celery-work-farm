@@ -2,6 +2,7 @@ import logging
 from functools import wraps
 from influxdb import InfluxDBClient
 from celery_work_farm import app
+from celery_work_farm.utils import GlobalValue
 
 logger = logging.getLogger(__name__)
 
@@ -165,33 +166,50 @@ def influxdb_insert_insert_only_changed_value_case(
     :param template:
     :return:
     """
-    global GLOBAL_VALUE
-
     try:
+        g = GlobalValue('redis', 6379, 0, 'changed_value_case', gv_name)
         c = InfluxDBHandler(host=host, port=port, database=database)
         d = make_template_data(d, template)
 
-        last = remove_time(d)
-        # if this is first time or celery restarted,
-        # no last data to compare with cuurent one.
-        # inserting all data
-        if gv_name not in GLOBAL_VALUE:
-            GLOBAL_VALUE[gv_name] = d
+        # if this is the first time or celery restarted,
+        # no last data to compare with current one.
+        if b'data' not in g.keys():
+            # g.set_value('data', last)
             c.insert(d)
+            d = remove_time(d)
+            g.set_value('data', d)
             return
 
+        # It forces to update all of data for every set interval.
         data = list()
-        for i, v in enumerate(last):
-            gv = remove_time(GLOBAL_VALUE[gv_name])
-            if v not in gv:
-                data.append(d[i])
+        global_value = g.get_value('data')
+
+        if not d:
+            logging.error('The received data is empty.')
+            return
+
+        if 'time' not in d[0]:
+            logging.error('The key, `time` is not in the received data.')
+            return
+
+        dt = d[0]['time']
+        current = remove_time(d)
+        global_value = remove_time(global_value)
+        for v in current:
+            if v not in global_value:
+                v['time'] = dt
+                data.append(v)
         if not data:
             return
+
         c.insert(data)
-        GLOBAL_VALUE[gv_name] = d
+        logging.info('Some of the status were changed.')
+        g.set_value('data', current)
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         logger.error(str(e))
+    finally:
+        del g
     return
